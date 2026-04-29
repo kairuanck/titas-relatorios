@@ -109,7 +109,7 @@ UF_COL_TO_LAB = {
         "SPIN":"SPIN RS","SYNTEC":"SYNTEC","WANPY":"WANPY",
     },
     "RJ": {"AGROLIFE":"AGROLIFE RJ","AVERT":"AVERT RJ","ELANCO":"ELANCO RJ"},
-    "PR": {"BBPET":"MUNDO ANIMAL PR","ELANCO":"ELANCO PR","SPIN":"SPIN PR"},
+    "PR": {"BBPET":"MUNDO ANIMAL PR","ELANCO":"ELANCO PR","SPIN":"SPIN PR","AGROLIFE":"AGROLIFE PR"},
 }
 
 LAB_ORDER = [
@@ -125,6 +125,17 @@ MESES = ["JANEIRO","FEVEREIRO","MARÇO","ABRIL","MAIO","JUNHO",
 VENDEDORAS_ORDER = ["Emily","Rosiris","Lizie","Tamires","Claudia"]
 VC_HEX = {"Emily":"154360","Rosiris":"1A5276","Lizie":"1F618D",
            "Tamires":"2471A3","Claudia":"2980B9"}
+
+# Mapeamento nome completo (RCA_NOME1) → nome curto
+NOME_COMPLETO_MAP = {
+    "EMILY COPETTI RAMOS":            "Emily",
+    "ROSIRIS DA SILVA OLIVEIRA":      "Rosiris",
+    "LIZIE LIBANO DE OLIVEIRA":       "Lizie",
+    "LIZIE CÂNFORA":                  "Lizie",
+    "LIZIE CANFORA":                  "Lizie",
+    "TAMIRES AGUIAR MARQUES PONTES":  "Tamires",
+    "CLAUDIA ELISIANE MELO":          "Claudia",
+}
 
 # ── Excel helpers ──────────────────────────────────────────────────────────
 def tb():
@@ -186,41 +197,69 @@ def sum_col(ws, row, ci, ds, bold=True, bg=None, color="000000"):
     if bg: c.fill = bg
 
 # ── Leitura de dados ────────────────────────────────────────────────────────
-def normalizar_colunas(df):
-    """Normaliza nomes de colunas com caracteres especiais que podem variar por encoding."""
-    rename = {}
-    for col in df.columns:
-        col_norm = col.strip()
-        # Mapear variações do nome Código
-        if col_norm.lower() in ('código', 'codigo', 'c\u00f3digo', 'cÃ³digo', 'cod', 'código'):
-            rename[col] = 'Código'
-        # Mapear variações de outras colunas com acento
-        elif col_norm.lower() in ('fantasia', 'nome fantasia'):
-            rename[col] = 'Fantasia'
-        elif 'ltima' in col_norm.lower() or 'ultima' in col_norm.lower():
-            rename[col] = 'Data da Última Compra'
-        elif col_norm.lower() in ('nome da cidade', 'cidade', 'nome cidade'):
-            rename[col] = 'Nome da Cidade'
-    if rename:
-        df = df.rename(columns=rename)
-    return df
+def normalizar_col_nome(col):
+    """Normaliza nome de coluna ignorando encoding e maiúsculas."""
+    return col.strip().upper().encode('ascii','ignore').decode()
 
 def load_base(file_bytes):
+    """
+    Suporta dois formatos de Base Titãs:
+    - Formato antigo: uma aba por vendedora, coluna 'Código'
+    - Formato novo: aba única 'basetitas', colunas CODIGO / UF / RCA_NOME1
+    """
     sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
+    first_df = list(sheets.values())[0]
+    cols_norm = [normalizar_col_nome(c) for c in first_df.columns]
+
+    # Detectar formato novo: tem CODIGO e RCA_NOME1
+    if 'CODIGO' in cols_norm and 'RCA_NOME1' in cols_norm:
+        df = first_df.copy()
+        # Renomear para nomes padronizados
+        rename = {}
+        for col in df.columns:
+            cn = normalizar_col_nome(col)
+            if cn == 'CODIGO':           rename[col] = 'Código'
+            elif cn == 'UF':             rename[col] = 'Estado'
+            elif cn == 'RCA_NOME1':      rename[col] = 'VendedoraNome'
+            elif cn == 'CIDADE':         rename[col] = 'Cidade'
+            elif cn == 'FANTASIA':       rename[col] = 'Fantasia'
+        df = df.rename(columns=rename)
+        df['Código'] = df['Código'].astype(str).str.strip()
+        # Mapear nome completo → nome curto
+        df['Vendedora'] = df['VendedoraNome'].str.strip().str.upper().map(
+            {k.upper(): v for k, v in NOME_COMPLETO_MAP.items()}
+        ).fillna(df['VendedoraNome'].str.strip())
+        # Sem coluna Filial — criamos vazia
+        df['Filial de Faturamento'] = ''
+        vendedoras_lista = sorted(df['Vendedora'].unique().tolist())
+        return df, vendedoras_lista
+
+    # Formato antigo: uma aba por vendedora
     parts = []
     for v, df in sheets.items():
-        df = normalizar_colunas(df)
-        # Fallback: se ainda não tem 'Código', tenta encontrar por posição
+        # Normalizar coluna Código (pode variar por encoding)
+        rename = {}
+        for col in df.columns:
+            cn = normalizar_col_nome(col)
+            if cn in ('CODIGO', 'C\u00d3DIGO', 'COD'):
+                rename[col] = 'Código'
+            elif cn == 'ESTADO' or cn == 'UF':
+                rename[col] = 'Estado'
+        df = df.rename(columns=rename)
+        # Fallback por posição se ainda sem Código
         if 'Código' not in df.columns:
             for col in df.columns:
                 sample = df[col].dropna().astype(str).head(10)
                 if sample.str.match(r'^\d{3,6}$').mean() > 0.7:
-                    df = df.rename(columns={col: 'Código'})
-                    break
+                    df = df.rename(columns={col: 'Código'}); break
         df = df.assign(Vendedora=v)
+        if 'Estado' not in df.columns:
+            df['Estado'] = ''
+        if 'Filial de Faturamento' not in df.columns:
+            df['Filial de Faturamento'] = ''
         parts.append(df)
     base = pd.concat(parts, ignore_index=True)
-    base["Código"] = base["Código"].astype(str).str.strip()
+    base['Código'] = base['Código'].astype(str).str.strip()
     return base, list(sheets.keys())
 
 def load_meta(file_bytes):
@@ -317,11 +356,20 @@ def load_all_data(files_uf, base):
         if lab not in result.columns: result[lab] = 0.0
     result = result.reset_index()
 
-    base_info = (base[["Código","Vendedora","Estado","Filial de Faturamento"]]
-                 .drop_duplicates("Código").set_index("Código"))
+    # Selecionar colunas que existem na base (compatível com ambos os formatos)
+    base_cols = ["Código","Vendedora"]
+    for col in ["Estado","Filial de Faturamento"]:
+        if col in base.columns:
+            base_cols.append(col)
+    base_info = (base[base_cols].drop_duplicates("Código").set_index("Código"))
     result = result.set_index("Código").join(base_info, how="left").reset_index()
     result["Vendedora"] = result["Vendedora"].fillna("NÃO IDENTIFICADA")
-    result["Estado"]    = result["Estado"].fillna("")
+    if "Estado" not in result.columns:
+        result["Estado"] = ""
+    else:
+        result["Estado"] = result["Estado"].fillna("")
+    if "Filial de Faturamento" not in result.columns:
+        result["Filial de Faturamento"] = ""
 
     labs_present = [l for l in LAB_ORDER if l in result.columns]
     result["Total"] = result[labs_present].sum(axis=1)
