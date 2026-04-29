@@ -186,9 +186,39 @@ def sum_col(ws, row, ci, ds, bold=True, bg=None, color="000000"):
     if bg: c.fill = bg
 
 # ── Leitura de dados ────────────────────────────────────────────────────────
+def normalizar_colunas(df):
+    """Normaliza nomes de colunas com caracteres especiais que podem variar por encoding."""
+    rename = {}
+    for col in df.columns:
+        col_norm = col.strip()
+        # Mapear variações do nome Código
+        if col_norm.lower() in ('código', 'codigo', 'c\u00f3digo', 'cÃ³digo', 'cod', 'código'):
+            rename[col] = 'Código'
+        # Mapear variações de outras colunas com acento
+        elif col_norm.lower() in ('fantasia', 'nome fantasia'):
+            rename[col] = 'Fantasia'
+        elif 'ltima' in col_norm.lower() or 'ultima' in col_norm.lower():
+            rename[col] = 'Data da Última Compra'
+        elif col_norm.lower() in ('nome da cidade', 'cidade', 'nome cidade'):
+            rename[col] = 'Nome da Cidade'
+    if rename:
+        df = df.rename(columns=rename)
+    return df
+
 def load_base(file_bytes):
     sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
-    parts = [df.assign(Vendedora=v) for v, df in sheets.items()]
+    parts = []
+    for v, df in sheets.items():
+        df = normalizar_colunas(df)
+        # Fallback: se ainda não tem 'Código', tenta encontrar por posição
+        if 'Código' not in df.columns:
+            for col in df.columns:
+                sample = df[col].dropna().astype(str).head(10)
+                if sample.str.match(r'^\d{3,6}$').mean() > 0.7:
+                    df = df.rename(columns={col: 'Código'})
+                    break
+        df = df.assign(Vendedora=v)
+        parts.append(df)
     base = pd.concat(parts, ignore_index=True)
     base["Código"] = base["Código"].astype(str).str.strip()
     return base, list(sheets.keys())
